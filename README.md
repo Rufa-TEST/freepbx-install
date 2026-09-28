@@ -13,6 +13,58 @@
 | `fpbx-scratch.sh` | Установка с нуля на чистый Debian 12: Asterisk 21 из исходников, PHP 8.2, MariaDB, Apache, FreePBX 17 из upstream-tarball |
 | `fpbx-lean.sh` | Прунинг уже установленной системы: удаление модулей вне белого списка |
 
+## Установка
+
+Все команды выполняются от root.
+
+### Оба скрипта одной строкой
+
+```bash
+cd /root
+for f in fpbx-scratch.sh fpbx-lean.sh; do
+  wget -q https://raw.githubusercontent.com/Rufa-TEST/freepbx-install/main/$f -O /root/$f \
+    && chmod +x /root/$f && echo "$f — ok"
+done
+ls -l /root/fpbx-*.sh
+```
+
+### Только установщик с нуля
+
+```bash
+wget https://raw.githubusercontent.com/Rufa-TEST/freepbx-install/main/fpbx-scratch.sh -O /root/fpbx-scratch.sh
+chmod +x /root/fpbx-scratch.sh
+/root/fpbx-scratch.sh --all
+```
+
+### Только прунинг
+
+```bash
+wget https://raw.githubusercontent.com/Rufa-TEST/freepbx-install/main/fpbx-lean.sh -O /root/fpbx-lean.sh
+chmod +x /root/fpbx-lean.sh
+/root/fpbx-lean.sh --prune
+```
+
+### Весь репозиторий
+
+```bash
+apt-get install -y git
+git clone https://github.com/Rufa-TEST/freepbx-install.git /root/freepbx-install
+chmod +x /root/freepbx-install/*.sh
+```
+
+Обновить уже склонированный:
+
+```bash
+git -C /root/freepbx-install pull
+```
+
+### Проверка
+
+```bash
+/root/fpbx-scratch.sh --status   # состояние системы
+/root/fpbx-lean.sh --list        # состав модулей с пометками keep/drop
+```
+
 ## fpbx-scratch.sh
 
 Отличие от штатного инсталлятора Sangoma: вместо `fwconsole ma installall`
@@ -61,6 +113,81 @@
 ```
 
 Без `--apply` ничего не удаляется.
+
+## Ручная чистка коммерческих модулей
+
+Если система уже развёрнута штатным инсталлятором Sangoma и нужно снять
+коммерческие модули, не подгоняя состав под белый список `fpbx-lean.sh`.
+
+Порядок и грабли, проверенные на живой системе:
+
+- `fwconsole ma uninstall` возвращает 0 даже при ошибке — результат проверять
+  перечитыванием `fwconsole ma list`, а не кодом возврата.
+- Зависимости требуют нескольких проходов: `cos`, `restapps`, `sms` уходят со
+  второго, `endpoint` — с третьего.
+- `ucp` не удаляется, пока стоит `webrtc` (webrtc зависит от ucp) — порядок
+  строго `webrtc` → `ucp`.
+- `sysadmin` нужен для `firewall`; если firewall не используется, снимаются оба.
+
+```bash
+# что стоит из коммерческих
+fwconsole ma list | awk -F'|' '$5 ~ /Commercial/ {print $2}'
+
+# снять модуль
+fwconsole ma uninstall <модуль> && fwconsole ma delete <модуль>
+
+# после всех удалений
+fwconsole reload
+
+# мёртвые процессы pm2 остаются в списке — убрать
+fwconsole pm2 --list
+fwconsole pm2 --delete <имя>
+```
+
+Вернуть модуль обратно:
+
+```bash
+fwconsole ma downloadinstall <модуль>
+```
+
+## Лишние системные сервисы
+
+После сноса модулей часть сервисов остаётся работать впустую. Сначала смотреть,
+что реально слушает порты:
+
+```bash
+systemctl list-units --type=service --state=running --no-pager
+ss -tulpn | grep -E "haproxy|tftp|redis|avahi|pnpd"
+```
+
+| Сервис | Когда можно гасить |
+|---|---|
+| `sangoma-pnpd` | автопровижининг Sangoma — не нужен без Endpoint Manager |
+| `avahi-daemon` | mDNS в локалке, телефонии не нужен |
+| `haproxy` | в FreePBX 17 фронтит UCP/WebRTC; если в `haproxy.cfg` нет `bind` — висит впустую |
+| `tftpd-hpa`, `xinetd` | раздача конфигов телефонам; гасить только если `/tftpboot` пуст |
+| `postfix` | только отправка почты (голосовая почта на email) |
+
+Не трогать: `redis-server` и `incron` — на них завязаны кэш фреймворка и
+отслеживание изменений конфигов.
+
+```bash
+systemctl disable --now sangoma-pnpd avahi-daemon haproxy
+
+# avahi поднимется обратно по socket-активации — закрыть и его
+systemctl disable --now avahi-daemon.socket
+systemctl mask avahi-daemon.service avahi-daemon.socket
+```
+
+`tftpd-hpa` и `xinetd` — sysv-скрипты: `systemctl disable --now` снимает
+автозапуск, но процесс не убивает. Добивать так:
+
+```bash
+systemctl disable --now tftpd-hpa xinetd
+service tftpd-hpa stop; service xinetd stop
+systemctl is-active tftpd-hpa xinetd
+ss -tulpn | grep ":69"
+```
 
 ## Проверено на
 
