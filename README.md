@@ -12,6 +12,7 @@
 |---|---|
 | `fpbx-scratch.sh` | Установка с нуля на чистый Debian 12: Asterisk 21 из исходников, PHP 8.2, MariaDB, Apache, FreePBX 17 из upstream-tarball |
 | `fpbx-lean.sh` | Прунинг уже установленной системы: удаление модулей вне белого списка |
+| `fpbx-maint.sh` | Обслуживание работающей АТС: обновление модулей, security-обновление PHP с рестартом Apache |
 
 ## Установка
 
@@ -21,7 +22,7 @@
 
 ```bash
 cd /root
-for f in fpbx-scratch.sh fpbx-lean.sh; do
+for f in fpbx-scratch.sh fpbx-lean.sh fpbx-maint.sh; do
   wget -q https://raw.githubusercontent.com/Rufa-TEST/freepbx-install/main/$f -O /root/$f \
     && chmod +x /root/$f && echo "$f — ok"
 done
@@ -63,6 +64,7 @@ git -C /root/freepbx-install pull
 ```bash
 /root/fpbx-scratch.sh --status   # состояние системы
 /root/fpbx-lean.sh --list        # состав модулей с пометками keep/drop
+/root/fpbx-maint.sh --status     # версии, звонки, записи, состояние PHP
 ```
 
 ## fpbx-scratch.sh
@@ -113,6 +115,31 @@ git -C /root/freepbx-install pull
 ```
 
 Без `--apply` ничего не удаляется.
+
+## fpbx-maint.sh
+
+Обслуживание уже работающей АТС. Asterisk не перезапускается, при активных
+звонках скрипт останавливается (обойти: `--force`).
+
+```
+./fpbx-maint.sh --status        # версии, звонки, место под записи, пустые файлы
+./fpbx-maint.sh --update        # бэкап (/etc/asterisk + дамп БД) → ma upgradeall → chown → reload
+./fpbx-maint.sh --php           # apt --only-upgrade php8.2* → рестарт Apache, если libphp (deleted)
+```
+
+Про PHP: после обновления пакетов mod_php Apache продолжает держать старую
+`libphp8.2.so (deleted)`, и GUI работает на старой версии (уведомление на
+дашборде не уходит), пока Apache не перезапущен. Рестарт Apache звонки не
+затрагивает.
+
+### Записи разговоров
+
+Настраивается в GUI: Inbound/Outbound Routes → «Запись вызова» = Да (один файл
+на звонок; запись на уровне внутренних даёт отдельный файл на каждую ногу
+ringall). Формат оставлять `wav` (`MIXMON_FORMAT`): GSM `WAV` не играет в
+браузере, а mp3 под именем `.wav` ломает просмотр в CDR (sox: «RIFF header not
+found»). Неотвеченные звонки оставляют пустые файлы 44 байта — их безопасно
+чистить `find /var/spool/asterisk/monitor -type f -size -101c -mtime +1`.
 
 ## Ручная чистка коммерческих модулей
 
