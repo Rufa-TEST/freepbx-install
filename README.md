@@ -77,16 +77,22 @@ git -C /root/freepbx-install pull
 неинтерактивного режима:
 
 ```
-./fpbx-scratch.sh --all         # всё целиком
+./fpbx-scratch.sh --all         # всё целиком (включая финальный шаг --post)
 ./fpbx-scratch.sh --deps        # только пакеты
 ./fpbx-scratch.sh --asterisk    # только сборка Asterisk (20-40 минут)
 ./fpbx-scratch.sh --freepbx     # только FreePBX + модули
 ./fpbx-scratch.sh --modules     # только доустановка модулей
+./fpbx-scratch.sh --post        # финал: ma upgradeall, security-обновление PHP, MIXMON_FORMAT=wav
 ./fpbx-scratch.sh --own         # свои модули из OWN_MODULES
 ./fpbx-scratch.sh --status      # состояние системы
 ```
 
 Скрипт идемпотентен: повторный запуск пропускает уже выполненные шаги.
+
+В `--all` входит финальный шаг `--post`: обновление модулей FreePBX до актуальных,
+security-обновление `php8.2*` с рестартом Apache (если `libphp8.2.so (deleted)`)
+и `MIXMON_FORMAT=wav`. Для уже работающей АТС то же самое по отдельности — `fpbx-maint.sh`.
+Запись на маршрутах (Inbound/Outbound → «Запись вызова» = Да) включается в GUI.
 
 ### Настройка
 

@@ -16,6 +16,7 @@
 #   ./fpbx-scratch.sh --asterisk        # только сборка Asterisk
 #   ./fpbx-scratch.sh --freepbx         # только FreePBX + модули
 #   ./fpbx-scratch.sh --modules         # только доустановка модулей
+#   ./fpbx-scratch.sh --post            # финал: обновление модулей, PHP, настройки записи
 #
 # Скрипт идемпотентен: повторный запуск пропускает уже сделанные шаги.
 # Сборка Asterisk занимает 20-40 минут.
@@ -51,7 +52,7 @@ OWN_MODULES=(
   # https://github.com/<аккаунт>/twtools/releases/latest/download/twtools.tgz
 )
 
-DO_DEPS=0; DO_AST=0; DO_FPBX=0; DO_MODS=0; DO_OWN=0; DO_STATUS=0
+DO_DEPS=0; DO_AST=0; DO_FPBX=0; DO_MODS=0; DO_POST=0; DO_OWN=0; DO_STATUS=0
 say()  { echo -e "\n=== $* ===" | tee -a "$LOG"; }
 note() { echo "  $*" | tee -a "$LOG"; }
 die()  { echo "ОШИБКА: $*" | tee -a "$LOG"; exit 1; }
@@ -86,17 +87,19 @@ menu() {
     echo "  4) Только FreePBX + модули"
     echo "  5) Только доустановка модулей по списку"
     echo "  6) Свои модули Techwave"
+    echo "  7) Финал: обновление модулей + PHP + настройки записи"
     echo "  9) Состояние системы"
     echo "  0) Выход"
     echo "------------------------------------------------------"
     read -rp "  Выбор: " ch
     case "$ch" in
-      1) DO_DEPS=1; DO_AST=1; DO_FPBX=1; DO_MODS=1; return ;;
+      1) DO_DEPS=1; DO_AST=1; DO_FPBX=1; DO_MODS=1; DO_POST=1; return ;;
       2) DO_DEPS=1; return ;;
       3) DO_AST=1; return ;;
       4) DO_FPBX=1; DO_MODS=1; return ;;
       5) DO_MODS=1; return ;;
       6) DO_OWN=1; return ;;
+      7) DO_POST=1; return ;;
       9) echo; status_line ;;
       0) exit 0 ;;
       *) echo "  Нет такого пункта." ;;
@@ -109,14 +112,15 @@ if [ $# -eq 0 ]; then
 else
   for a in "$@"; do
     case "$a" in
-      --all) DO_DEPS=1; DO_AST=1; DO_FPBX=1; DO_MODS=1 ;;
+      --all) DO_DEPS=1; DO_AST=1; DO_FPBX=1; DO_MODS=1; DO_POST=1 ;;
       --deps) DO_DEPS=1 ;;
       --asterisk) DO_AST=1 ;;
       --freepbx) DO_FPBX=1; DO_MODS=1 ;;
       --modules) DO_MODS=1 ;;
+      --post) DO_POST=1 ;;
       --own) DO_OWN=1 ;;
       --status) DO_STATUS=1 ;;
-      *) sed -n '2,18p' "$0"; exit 1 ;;
+      *) sed -n '2,19p' "$0"; exit 1 ;;
     esac
   done
 fi
@@ -310,6 +314,50 @@ if [ $DO_MODS -eq 1 ]; then
   if [ ${#failed[@]} -gt 0 ]; then
     note "Не установились: ${failed[*]} — подробности в $LOG"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4a. Финал: обновление модулей, security-обновление PHP, настройки записи
+# Всё идемпотентно; Asterisk здесь не перезапускается.
+# ---------------------------------------------------------------------------
+if [ $DO_POST -eq 1 ]; then
+  command -v fwconsole >/dev/null 2>&1 || die "FreePBX не установлен"
+
+  say "Обновление модулей FreePBX до актуальных версий"
+  fwconsole ma upgradeall 2>&1 | tee -a "$LOG" | tail -10
+  fwconsole chown >>"$LOG" 2>&1
+  fwconsole reload 2>&1 | tail -3 | tee -a "$LOG"
+  note "FreePBX: $(fwconsole --version 2>/dev/null | head -1)"
+
+  say "Security-обновление PHP 8.2"
+  pkgs=$(dpkg-query -W -f='${Package} ${Status}\n' 'php8.2*' 'libapache2-mod-php8.2' 2>/dev/null \
+         | awk '$NF=="installed"{print $1}' | sort -u)
+  if [ -n "$pkgs" ]; then
+    note "было: $(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+    apt-get update >>"$LOG" 2>&1
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade $pkgs >>"$LOG" 2>&1 \
+      || note "ВНИМАНИЕ: обновление php8.2* не прошло, см. $LOG"
+    note "стало: $(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+    # mod_php держит старую libphp (deleted) до рестарта Apache; звонки это не затрагивает
+    apid=$(pgrep -o apache2 2>/dev/null || true)
+    if [ -n "$apid" ] && grep -q 'libphp8.2.so (deleted)' "/proc/$apid/maps" 2>/dev/null; then
+      note "Apache держит удалённую libphp — рестарт apache2"
+      systemctl restart apache2 || note "ВНИМАНИЕ: apache2 не перезапустился"
+    else
+      note "рестарт Apache не нужен"
+    fi
+  else
+    note "пакеты php8.2* не найдены — пропускаю"
+  fi
+
+  say "Настройки записи разговоров"
+  # wav — единственный формат, который играет и в браузере, и в CDR (sox).
+  # GSM WAV не играет в браузере, mp3 под именем .wav ломает CDR.
+  fwconsole setting MIXMON_FORMAT wav >>"$LOG" 2>&1 \
+    && note "MIXMON_FORMAT=wav" || note "ВНИМАНИЕ: MIXMON_FORMAT не выставлен, см. $LOG"
+  fwconsole reload >>"$LOG" 2>&1
+  note "Запись на маршрутах включается в GUI: Inbound/Outbound Routes → «Запись вызова» = Да"
 fi
 
 # --- 5. Свои модули Techwave ---
